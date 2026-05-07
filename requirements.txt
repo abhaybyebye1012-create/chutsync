@@ -1,0 +1,3 @@
+# Build tools only – they are not needed on the target system
+pyinstaller>=6.6.0
+appimage-builder>=1.2.0
