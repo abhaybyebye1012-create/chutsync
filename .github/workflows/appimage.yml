@@ -1,0 +1,117 @@
+name: Build FFSubSync GUI – AppImage
+
+on:
+  push:
+    tags:
+      - 'v*'                # optional – also run on version tags
+  workflow_dispatch:       # allow manual runs
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write          # needed only if you publish to GitHub Packages
+
+    steps:
+      # --------------------------------------------------------------
+      # 1️⃣ Checkout the source code
+      # --------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # needed for tag handling, etc.
+
+      # --------------------------------------------------------------
+      # 2️⃣ Install minimal OS tools needed for building & testing
+      # --------------------------------------------------------------
+      - name: Install system utilities
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+              git curl lsb-release ca-certificates \
+              fuse libfuse2 squashfs-tools \
+              xvfb  # X virtual framebuffer for the test container
+
+      # --------------------------------------------------------------
+      # 3️⃣ Make the build script executable (the step you asked for)
+      # --------------------------------------------------------------
+      - name: Make build script executable
+        # If you stored the script in a sub‑folder, replace "./build_ffsubsync_gui.sh"
+        # with the proper relative path, e.g. "./scripts/build_ffsubsync_gui.sh"
+        run: chmod +x ./scripts/build_ffsubsync_gui.sh
+
+      # --------------------------------------------------------------
+      # 4️⃣ Build the frozen GUI binary and package it as an AppImage
+      # --------------------------------------------------------------
+      - name: Build AppImage
+        run: |
+          # The script writes the full path of the produced AppImage to appimage_path.txt
+          sudo ./build_ffsubsync_gui.sh
+          echo "✅ AppImage produced – see appimage_path.txt"
+        # No special env vars needed; the script outputs the path in a file.
+
+      # --------------------------------------------------------------
+      # 5️⃣ Validate the resulting AppImage on a *real* old‑Debian image
+      # --------------------------------------------------------------
+      - name: Test AppImage on Debian‑stretch‑slim (headless Xvfb)
+        shell: bash
+        env:
+          APPIMAGE: "$(cat appimage_path.txt)"
+        run: |
+          set -euo pipefail
+
+          # The image that most legacy Debian users still run (glibc 2.24)
+          IMAGE="debian:stretch-slim"
+          echo "▶️  Running test container from $IMAGE"
+
+          docker run --rm -t \
+            -e DISPLAY=$DISPLAY \
+            -v /tmp/.X11-unix:/tmp/.X11-unix:ro \
+            -v "${APPIMAGE}":/opt/AppImage:${APPIMAGE##*/} \
+            "${IMAGE}" bash -c '
+              set -euo pipefail
+
+              # Install the only runtime dependency on the target image
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                ffmpeg xvfb libx11-6 libxext6 libxrender1 libsm6 \
+                libice6 libgl1-mesa-dri
+
+              # Start Xvfb because the container has no real display
+              Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
+              export DISPLAY=:99
+
+              # Make the AppImage runnable and launch it
+              chmod +x /opt/AppImage
+              # Verify it starts without crashing
+              /opt/AppImage --version   # prints version/info if the script supports it
+              /opt/AppImage &
+              sleep 5   # give the window a moment to appear
+              pkill -f ffsync   # clean up the GUI process
+            '
+
+          echo "✅ AppImage passed the legacy‑Debian test"
+
+      # --------------------------------------------------------------
+      # 6️⃣ Upload the AppImage as a downloadable artifact
+      # --------------------------------------------------------------
+      - name: Upload AppImage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffsync-gui-AppImage
+          path: |
+            $(cat appimage_path.txt)
+          retention-days: 30   # keep for a month (adjust as you wish)
+
+      # --------------------------------------------------------------
+      # 7️⃣ (Optional) Create a GitHub Release that contains the artifact
+      # --------------------------------------------------------------
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/') && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "$(cat appimage_path.txt)"
+          name: "FFSubSync GUI – AppImage"
+          generate-notes: true
